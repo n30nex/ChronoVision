@@ -161,6 +161,16 @@ All `/api/*` and `/data/*` routes require `API_KEY` if configured.
   - Body: `{query, lookback_hours?, max_items?}`
   - Response: `{answer, window, timestamp}`
 
+- `POST /api/summary/range`
+  - Body: `{start, end, max_items?}`
+  - Response: `{answer, window, timestamp}`
+
+- `GET /api/story/daily`
+  - Response: `{bullets, window, timestamp}`
+
+- `GET /api/highlights/daily`
+  - Response: `{items, window, timestamp}`
+
 - `GET /api/reports/daily`
   - Response: daily report list
 
@@ -241,15 +251,17 @@ Usage record:
 9) Write last processed state to `data/run/last_processed.json`.
 
 ### Comparisons and Reports
-- 10-minute compare runs after each processed snapshot.
-- Hourly compare runs on schedule; chooses the nearest snapshot to one hour prior.
-- Daily report aggregates hourly comparisons and tags, runs at 00:05.
+- 10-minute compare runs on schedule; summarizes the last 10 snapshots (~10 minutes).
+- Hourly compare runs on schedule; summarizes the last 60 snapshots (~60 minutes).
+- Daily report aggregates hourly comparisons and tags for the previous local day, runs at 00:05.
 - Custom compare compares any two snapshot files selected by the UI.
 
 ### Ask the Feed
 - Builds context from recent description records.
 - Truncates each entry for length control.
 - Gemini is prompted to answer only using the provided context.
+- Range summaries combine descriptions and comparisons within a selected time window.
+- Range summaries ask Gemini for a detailed what/who/where/when narrative and consistent person labels.
 
 ### Rate Limiting and Retry Strategy
 - Each provider has its own `RateLimiter`.
@@ -276,13 +288,18 @@ UI behavior:
 - Polls data on a timer (`UI_REFRESH_INTERVAL_SEC`).
 - Uses `/api/descriptions` to power latest summary, history, trends, and timelapse.
 - Uses `/api/compare/*` and `/api/reports/daily` for timelines and summaries.
+- Uses `/api/story/daily` and `/api/highlights/daily` for narrative insights.
 - Uses `/api/usage/summary` for cost reporting.
 - Uses `localStorage` for API key persistence and attaches it to requests.
+- Range summary includes preset windows (1h/4h/12h/24h) that set start/end.
 
 Key UI features:
 - Latest snapshot + tags
 - Live preview capture
 - Tag trends (hourly/daily)
+- Range summary by time window
+- Daily story arc (hourly comparison timeline)
+- Day highlight reel (top snapshots)
 - Timelapse scrubbing
 - 10-minute and hourly change lists
 - Daily summary + highlights

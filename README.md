@@ -15,6 +15,7 @@
 5. Open `http://localhost:8080`.
 6. Stop everything with `stop.ps1` when needed.
 7. If `API_KEY` is set, the UI will prompt for it on first load (stored in browser localStorage).
+8. Use Range Summary presets (1h/4h/12h/24h) to quickly summarize recent activity.
 
 ## Configuration Reference
 All settings live in `.env`. See `.env.example` for defaults.
@@ -46,6 +47,9 @@ Key additions:
 - `GET /api/compare/hourly`: hourly comparisons.
 - `POST /api/compare/custom`: compare two snapshots (body: `snapshot_a`, `snapshot_b`).
 - `POST /api/ask`: ask a question about recent snapshots (body: `query`, optional `lookback_hours`, `max_items`).
+- `POST /api/summary/range`: summarize a time range (body: `start`, `end`, optional `max_items`).
+- `GET /api/story/daily`: timeline bullets from hourly comparisons (query: `hours`, `max_items`).
+- `GET /api/highlights/daily`: top 3 snapshots by activity (query: `hours`, `max_items`).
 - `GET /api/reports/daily`: daily summaries with highlights and tags.
 - `GET /api/usage/summary`: token/cost totals for last N days.
 

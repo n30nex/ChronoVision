@@ -4,7 +4,7 @@ import re
 import subprocess
 import time
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dt_time
 from pathlib import Path
 from typing import Optional
 
@@ -229,6 +229,131 @@ def _build_ask_context(
     return "\n".join(lines), len(lines), window_label, tags_summary
 
 
+def _filter_records_in_range(items: list[dict], start: datetime, end: datetime) -> list[dict]:
+    filtered = []
+    for item in items:
+        ts = _parse_iso(item.get("timestamp")) if isinstance(item, dict) else None
+        if not ts:
+            continue
+        if start <= ts <= end:
+            filtered.append(item)
+    return filtered
+
+
+def _build_range_context(
+    descriptions: list[dict],
+    compare_items: list[dict],
+    settings,
+    max_items: int,
+) -> tuple[str, str, str, str, int, int]:
+    sorted_desc = sorted(
+        descriptions,
+        key=lambda item: _parse_iso(item.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    sliced = sorted_desc[-max_items:] if max_items > 0 else sorted_desc
+    desc_lines = []
+    timestamps = []
+    for item in sliced:
+        ts = _parse_iso(item.get("timestamp"))
+        if ts:
+            timestamps.append(ts)
+            local_ts = ts.astimezone(settings.tz).strftime("%Y-%m-%d %H:%M")
+        else:
+            local_ts = item.get("timestamp") or "unknown time"
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        text = safe_truncate(text, 200)
+        tags_line = _format_tags_compact(item.get("tags"))
+        line = f"- {local_ts}: {text}"
+        if tags_line != "none":
+            line += f" (tags: {tags_line})"
+        desc_lines.append(line)
+
+    compare_lines = []
+    sorted_compare = sorted(
+        compare_items,
+        key=lambda item: _parse_iso(item.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    for item in sorted_compare:
+        ts = _parse_iso(item.get("timestamp"))
+        if ts:
+            local_ts = ts.astimezone(settings.tz).strftime("%Y-%m-%d %H:%M")
+        else:
+            local_ts = item.get("timestamp") or "unknown time"
+        label = item.get("label") or item.get("type") or "compare"
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        text = safe_truncate(text, 200)
+        compare_lines.append(f"- [{label}] {local_ts}: {text}")
+
+    if timestamps:
+        start = min(timestamps).astimezone(settings.tz)
+        end = max(timestamps).astimezone(settings.tz)
+        if start.date() == end.date():
+            window_label = f"{start:%Y-%m-%d} {start:%H:%M} - {end:%H:%M}"
+        else:
+            window_label = f"{start:%Y-%m-%d %H:%M} - {end:%Y-%m-%d %H:%M}"
+    else:
+        window_label = "selected range"
+
+    tags_summary = _format_tags_summary(_aggregate_tags(sliced))
+    description_context = "\n".join(desc_lines) if desc_lines else "none"
+    compare_context = "\n".join(compare_lines) if compare_lines else "none"
+    return description_context, compare_context, window_label, tags_summary, len(desc_lines), len(compare_lines)
+
+
+def _format_window_label(start: datetime, end: datetime, settings) -> str:
+    start_local = start.astimezone(settings.tz)
+    end_local = end.astimezone(settings.tz)
+    if start_local.date() == end_local.date():
+        return f"{start_local:%Y-%m-%d} {start_local:%H:%M} - {end_local:%H:%M}"
+    return f"{start_local:%Y-%m-%d %H:%M} - {end_local:%Y-%m-%d %H:%M}"
+
+
+def _build_story_context(compare_items: list[dict], settings, max_items: int) -> tuple[str, int]:
+    sorted_items = sorted(
+        compare_items,
+        key=lambda item: _parse_iso(item.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    sliced = sorted_items[-max_items:] if max_items > 0 else sorted_items
+    lines = []
+    for item in sliced:
+        ts = _parse_iso(item.get("timestamp"))
+        if ts:
+            local_ts = ts.astimezone(settings.tz).strftime("%Y-%m-%d %H:%M")
+        else:
+            local_ts = item.get("timestamp") or "unknown time"
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        text = safe_truncate(text, 200)
+        lines.append(f"- {local_ts}: {text}")
+    return "\n".join(lines), len(lines)
+
+
+def _parse_story_response(text: str) -> list[str]:
+    data = _extract_json_object(text)
+    if isinstance(data, dict):
+        bullets = data.get("bullets")
+        if isinstance(bullets, list):
+            cleaned = [str(item).strip() for item in bullets if str(item).strip()]
+            if cleaned:
+                return cleaned
+    lines = [line.strip("- ").strip() for line in text.splitlines()]
+    return [line for line in lines if line]
+
+
+def _is_no_change_text(text: str) -> bool:
+    value = str(text or "").lower()
+    return (
+        "no significant change" in value
+        or "no meaningful change" in value
+        or "no change" in value
+    )
+
+
 class TaskRunner:
     def __init__(self, settings, metrics):
         self.settings = settings
@@ -394,7 +519,6 @@ class TaskRunner:
                     "description",
                 )
 
-            self._compare_recent(path)
             self._mark_processed(path, snapshot_ts)
 
     def _describe_with_groq(self, path: Path, snapshot_ts: str) -> tuple[Optional[str], float, dict]:
@@ -483,29 +607,41 @@ class TaskRunner:
         data = _extract_json_object(content)
         return _normalize_tags(data)
 
-    def _compare_recent(self, path: Path) -> None:
+    def compare_recent(self) -> None:
         snapshots = storage.list_snapshot_files(self.settings.snapshots_dir)
         if len(snapshots) < 2:
             return
-        latest_two = snapshots[-2:]
-        if latest_two[1] != path:
-            latest_two = [latest_two[0], path]
-        first, second = latest_two
-        self._compare_images(first, second, "10-minute")
+        latest_ts = _parse_snapshot_time(snapshots[-1], self.settings)
+        if latest_ts is None:
+            return
+        window = _window_snapshots(
+            snapshots,
+            latest_ts,
+            minutes=10,
+            settings=self.settings,
+            max_images=10,
+        )
+        if len(window) < 2:
+            return
+        self._compare_sequence(window, "10-minute")
 
     def compare_hourly(self) -> None:
         snapshots = storage.list_snapshot_files(self.settings.snapshots_dir)
         if len(snapshots) < 2:
             return
-        latest = snapshots[-1]
-        latest_ts = _parse_snapshot_time(latest, self.settings)
+        latest_ts = _parse_snapshot_time(snapshots[-1], self.settings)
         if latest_ts is None:
             return
-        target = latest_ts - timedelta(hours=1)
-        candidate = _find_nearest_snapshot(snapshots, target, self.settings)
-        if candidate is None:
+        window = _window_snapshots(
+            snapshots,
+            latest_ts,
+            minutes=60,
+            settings=self.settings,
+            max_images=60,
+        )
+        if len(window) < 2:
             return
-        self._compare_images(candidate, latest, "hourly")
+        self._compare_sequence(window, "hourly")
 
     def compare_custom(self, path_a: Path, path_b: Path) -> dict:
         text, latency, usage = self._run_gemini_compare(path_a, path_b, "custom")
@@ -591,13 +727,209 @@ class TaskRunner:
             },
         }
 
+    def summarize_range(self, start: datetime, end: datetime, max_items: int) -> dict:
+        descriptions = storage.fetch_records_since(self.settings.data_dir, "descriptions", start)
+        descriptions = _filter_records_in_range(descriptions, start, end)
+
+        compare_items = []
+        for list_name, label in (
+            ("compare_10m", "10-minute"),
+            ("compare_hourly", "hourly"),
+            ("compare_custom", "custom"),
+        ):
+            records = storage.fetch_records_since(self.settings.data_dir, list_name, start)
+            records = _filter_records_in_range(records, start, end)
+            for record in records:
+                record = dict(record)
+                record["label"] = label
+                compare_items.append(record)
+
+        if not descriptions and not compare_items:
+            return {
+                "timestamp": now_utc_iso(),
+                "answer": "No snapshots or comparisons in the selected range.",
+                "window": {"start": start.isoformat(), "end": end.isoformat(), "items": 0, "comparisons": 0},
+            }
+
+        (
+            description_context,
+            compare_context,
+            window_label,
+            tags_summary,
+            used_items,
+            compare_count,
+        ) = _build_range_context(descriptions, compare_items, self.settings, max_items)
+
+        metadata = f"snapshots={used_items}, comparisons={compare_count}"
+
+        text, latency, usage = self._run_gemini_range_summary(
+            window_label,
+            tags_summary,
+            metadata,
+            description_context,
+            compare_context,
+        )
+        timestamp = now_utc_iso()
+        if not text:
+            self.metrics.last_gemini_failure = timestamp
+            self.metrics.record_api_call("gemini", False, latency)
+            return {
+                "timestamp": timestamp,
+                "answer": "",
+                "error": "range_summary_failed",
+            }
+
+        self.metrics.last_gemini_success = timestamp
+        self.metrics.record_api_call("gemini", True, latency)
+        answer = safe_truncate(text, 5000)
+        if usage:
+            record_usage(
+                self.settings,
+                "gemini",
+                self.settings.google_model,
+                usage,
+                "range_summary",
+            )
+        return {
+            "timestamp": timestamp,
+            "answer": answer,
+            "window": {
+                "label": window_label,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "items": used_items,
+                "comparisons": compare_count,
+            },
+        }
+
+    def story_arc(self, lookback_hours: int, max_items: int) -> dict:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=lookback_hours)
+        compare_items = storage.fetch_records_since(self.settings.data_dir, "compare_hourly", start)
+        compare_items = _filter_records_in_range(compare_items, start, end)
+        if not compare_items:
+            return {
+                "timestamp": now_utc_iso(),
+                "bullets": [],
+                "window": {"label": _format_window_label(start, end, self.settings), "items": 0},
+            }
+
+        compare_context, used_items = _build_story_context(compare_items, self.settings, max_items)
+        window_label = _format_window_label(start, end, self.settings)
+        tag_items = _filter_descriptions(self.settings, start)
+        tags_summary = _format_tags_summary(_aggregate_tags(tag_items))
+        metadata = f"comparisons={used_items}"
+
+        text, latency, usage = self._run_gemini_story_arc(
+            window_label,
+            tags_summary,
+            metadata,
+            compare_context,
+        )
+        timestamp = now_utc_iso()
+        if not text:
+            self.metrics.last_gemini_failure = timestamp
+            self.metrics.record_api_call("gemini", False, latency)
+            return {"timestamp": timestamp, "bullets": [], "error": "story_arc_failed"}
+
+        self.metrics.last_gemini_success = timestamp
+        self.metrics.record_api_call("gemini", True, latency)
+        bullets = [_ for _ in _parse_story_response(text)]
+        bullets = [safe_truncate(item, 140) for item in bullets][:12]
+        if usage:
+            record_usage(
+                self.settings,
+                "gemini",
+                self.settings.google_model,
+                usage,
+                "story_arc",
+            )
+        return {
+            "timestamp": timestamp,
+            "bullets": bullets,
+            "window": {"label": window_label, "items": used_items},
+        }
+
+    def highlight_reel(self, lookback_hours: int, max_items: int) -> dict:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=lookback_hours)
+        descriptions = storage.fetch_records_since(self.settings.data_dir, "descriptions", start)
+        descriptions = _filter_records_in_range(descriptions, start, end)
+        if not descriptions:
+            return {
+                "timestamp": now_utc_iso(),
+                "items": [],
+                "window": {"label": _format_window_label(start, end, self.settings), "items": 0},
+            }
+
+        compare_items = []
+        for list_name in ("compare_10m", "compare_hourly"):
+            records = storage.fetch_records_since(self.settings.data_dir, list_name, start)
+            records = _filter_records_in_range(records, start, end)
+            compare_items.extend(records)
+
+        compare_text_map = {}
+        for item in compare_items:
+            snapshot_b = item.get("snapshot_b")
+            text = str(item.get("text") or "").strip()
+            if not snapshot_b or not text:
+                continue
+            existing = compare_text_map.get(snapshot_b)
+            if not existing or (_is_no_change_text(existing) and not _is_no_change_text(text)):
+                compare_text_map[snapshot_b] = text
+
+        scored = []
+        for item in descriptions[-max_items:]:
+            tags = item.get("tags") or {}
+            tag_count = sum(len(tags.get(key, [])) for key in ("people", "vehicles", "objects"))
+            compare_text = compare_text_map.get(item.get("snapshot"), "")
+            change_bonus = 3 if compare_text and not _is_no_change_text(compare_text) else 0
+            score = tag_count * 10 + change_bonus
+            scored.append((score, item, compare_text))
+
+        scored.sort(
+            key=lambda entry: (
+                entry[0],
+                _parse_iso(entry[1].get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
+        )
+        items = []
+        for _, item, compare_text in scored[:3]:
+            items.append(
+                {
+                    "timestamp": item.get("timestamp"),
+                    "snapshot": item.get("snapshot"),
+                    "text": item.get("text"),
+                    "tags": item.get("tags"),
+                    "compare_text": compare_text,
+                }
+            )
+
+        return {
+            "timestamp": now_utc_iso(),
+            "items": items,
+            "window": {
+                "label": _format_window_label(start, end, self.settings),
+                "items": len(descriptions),
+                "comparisons": len(compare_items),
+            },
+        }
+
     def daily_report(self) -> None:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        recent = storage.fetch_records_since(self.settings.data_dir, "compare_hourly", cutoff)
+        local_today = local_timestamp(self.settings).date()
+        start_local = self.settings.tz.localize(datetime.combine(local_today - timedelta(days=1), dt_time.min))
+        end_local = self.settings.tz.localize(datetime.combine(local_today, dt_time.min))
+        start = start_local.astimezone(timezone.utc)
+        end = end_local.astimezone(timezone.utc)
+
+        recent = storage.fetch_records_since(self.settings.data_dir, "compare_hourly", start)
+        recent = _filter_records_in_range(recent, start, end)
         if not recent:
             return
 
-        tag_items = _filter_descriptions(self.settings, cutoff)
+        tag_items = storage.fetch_records_since(self.settings.data_dir, "descriptions", start)
+        tag_items = _filter_records_in_range(tag_items, start, end)
         tags_summary = _aggregate_tags(tag_items)
         tags_summary_text = _format_tags_summary(tags_summary)
 
@@ -605,7 +937,7 @@ class TaskRunner:
         if not summary_text:
             return
         timestamp = now_utc_iso()
-        local_label = local_timestamp(self.settings).strftime("%Y-%m-%d")
+        local_label = (local_today - timedelta(days=1)).strftime("%Y-%m-%d")
         report = {
             "timestamp": timestamp,
             "date": local_label,
@@ -668,6 +1000,47 @@ class TaskRunner:
                 f"compare_{label}",
             )
 
+    def _compare_sequence(self, paths: list[Path], label: str) -> None:
+        text, latency, usage = self._run_gemini_compare_sequence(paths, label)
+        timestamp = now_utc_iso()
+        if not text:
+            self.metrics.last_gemini_failure = timestamp
+            self.metrics.record_api_call("gemini", False, latency)
+            return
+        if len(text) > 200:
+            logger.info("Truncating Gemini compare output to 200 chars")
+        text = safe_truncate(text, 200)
+        self.metrics.last_gemini_success = timestamp
+        self.metrics.record_api_call("gemini", True, latency)
+
+        first = paths[0]
+        last = paths[-1]
+        record = {
+            "timestamp": timestamp,
+            "snapshot_a": _relative_path(first, self.settings.data_dir),
+            "snapshot_b": _relative_path(last, self.settings.data_dir),
+            "snapshot_count": len(paths),
+            "text": text,
+            "provider": "gemini",
+            "model": self.settings.google_model,
+            "prompt_version": prompts.PROMPT_VERSION,
+            "latency_ms": round(latency, 2),
+        }
+        out_dir = self.settings.compare_10m_dir if label == "10-minute" else self.settings.compare_hourly_dir
+        out_path = _json_path_for_snapshot(last, self.settings.snapshots_dir, out_dir)
+        storage.atomic_write_json(out_path, record)
+        list_name = "compare_10m" if label == "10-minute" else "compare_hourly"
+        storage.append_record(self.settings.data_dir, list_name, record)
+
+        if usage:
+            record_usage(
+                self.settings,
+                "gemini",
+                self.settings.google_model,
+                usage,
+                f"compare_{label}",
+            )
+
     def _run_gemini_compare(self, path_a: Path, path_b: Path, label: str) -> tuple[str, float, dict]:
         def _request():
             mime_a, data_a = encode_image(path_a)
@@ -707,6 +1080,48 @@ class TaskRunner:
         usage = _extract_gemini_usage(result)
         return text, latency, usage
 
+    def _run_gemini_compare_sequence(
+        self,
+        paths: list[Path],
+        label: str,
+    ) -> tuple[str, float, dict]:
+        def _request():
+            timestamps = []
+            parts = []
+            for path in paths:
+                mime, data = encode_image(path)
+                timestamps.append(_snapshot_label(path, self.settings))
+                parts.append({"inline_data": {"mime_type": mime, "data": data}})
+            window_label = f"{timestamps[0]} - {timestamps[-1]}"
+            system, user = prompts.gemini_compare_sequence_prompt(window_label, label, timestamps)
+            payload = {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": user}, *parts],
+                    }
+                ],
+                "generationConfig": {"temperature": 0.2},
+            }
+            url = f"{GEMINI_BASE_URL}/models/{self.settings.google_model}:generateContent"
+            with httpx.Client(timeout=90) as client:
+                resp = client.post(url, params={"key": self.settings.google_api_key}, json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
+        result, latency, error = _call_with_retry(
+            self.gemini_limiter,
+            "gemini",
+            self.settings.api_retry_max_attempts,
+            _request,
+        )
+        if error or not result:
+            return "", 0.0, {}
+        text = _extract_gemini_text(result)
+        usage = _extract_gemini_usage(result)
+        return text, latency, usage
+
     def _run_gemini_ask(
         self,
         query: str,
@@ -716,6 +1131,92 @@ class TaskRunner:
     ) -> tuple[str, float, dict]:
         def _request():
             system, user = prompts.gemini_ask_prompt(query, window_label, tags_summary, context)
+            payload = {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": user}],
+                    }
+                ],
+                "generationConfig": {"temperature": 0.2},
+            }
+            url = f"{GEMINI_BASE_URL}/models/{self.settings.google_model}:generateContent"
+            with httpx.Client(timeout=60) as client:
+                resp = client.post(url, params={"key": self.settings.google_api_key}, json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
+        result, latency, error = _call_with_retry(
+            self.gemini_limiter,
+            "gemini",
+            self.settings.api_retry_max_attempts,
+            _request,
+        )
+        if error or not result:
+            return "", 0.0, {}
+        text = _extract_gemini_text(result)
+        usage = _extract_gemini_usage(result)
+        return text, latency, usage
+
+    def _run_gemini_range_summary(
+        self,
+        window_label: str,
+        tags_summary: str,
+        metadata: str,
+        description_context: str,
+        compare_context: str,
+    ) -> tuple[str, float, dict]:
+        def _request():
+            system, user = prompts.gemini_range_summary_prompt(
+                window_label,
+                tags_summary,
+                metadata,
+                description_context,
+                compare_context,
+            )
+            payload = {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": user}],
+                    }
+                ],
+                "generationConfig": {"temperature": 0.2},
+            }
+            url = f"{GEMINI_BASE_URL}/models/{self.settings.google_model}:generateContent"
+            with httpx.Client(timeout=60) as client:
+                resp = client.post(url, params={"key": self.settings.google_api_key}, json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
+        result, latency, error = _call_with_retry(
+            self.gemini_limiter,
+            "gemini",
+            self.settings.api_retry_max_attempts,
+            _request,
+        )
+        if error or not result:
+            return "", 0.0, {}
+        text = _extract_gemini_text(result)
+        usage = _extract_gemini_usage(result)
+        return text, latency, usage
+
+    def _run_gemini_story_arc(
+        self,
+        window_label: str,
+        tags_summary: str,
+        metadata: str,
+        compare_context: str,
+    ) -> tuple[str, float, dict]:
+        def _request():
+            system, user = prompts.gemini_story_arc_prompt(
+                window_label,
+                tags_summary,
+                metadata,
+                compare_context,
+            )
             payload = {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [
@@ -922,3 +1423,23 @@ def _find_nearest_snapshot(snapshots: list[Path], target: datetime, settings) ->
     if best_delta is not None and best_delta > 60 * 60 * 2:
         return None
     return best
+
+
+def _window_snapshots(
+    snapshots: list[Path],
+    end: datetime,
+    minutes: int,
+    settings,
+    max_images: int,
+) -> list[Path]:
+    start = end - timedelta(minutes=minutes)
+    in_window = []
+    for path in snapshots:
+        ts = _parse_snapshot_time(path, settings)
+        if ts is None:
+            continue
+        if start <= ts <= end:
+            in_window.append(path)
+    if len(in_window) > max_images:
+        return in_window[-max_images:]
+    return in_window

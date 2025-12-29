@@ -5,6 +5,7 @@
   historyQuery: "",
   descriptions: [],
   descriptionsLimit: 500,
+  compare10m: [],
   trendMode: "hourly",
   timelapse: {
     mode: "daily",
@@ -22,6 +23,8 @@
 };
 
 const API_KEY_STORAGE = "snapshotVisionApiKey";
+const ACTIVE_WINDOW_MINUTES = 20;
+const ACTIVE_WINDOW_MAX_ITEMS = 5;
 
 const elements = {
   health: document.getElementById("health-indicator"),
@@ -36,11 +39,24 @@ const elements = {
   activeLabel: document.getElementById("active-label"),
   activeTime: document.getElementById("active-time"),
   activeTags: document.getElementById("active-tags"),
+  activeChange: document.getElementById("active-change"),
+  activeStability: document.getElementById("active-stability"),
+  activeLastSeen: document.getElementById("active-last-seen"),
+  activeTagsLabel: document.getElementById("active-tags-label"),
   askCard: document.getElementById("ask-card"),
   askQuery: document.getElementById("ask-query"),
   askRun: document.getElementById("ask-run"),
   askResponse: document.getElementById("ask-response"),
   askWindow: document.getElementById("ask-window"),
+  rangeStart: document.getElementById("range-start"),
+  rangeEnd: document.getElementById("range-end"),
+  rangeRun: document.getElementById("range-run"),
+  rangeMeta: document.getElementById("range-meta"),
+  rangeResponse: document.getElementById("range-response"),
+  rangePresetButtons: document.querySelectorAll("[data-range-hours]"),
+  storyArc: document.getElementById("story-arc"),
+  storyArcRefresh: document.getElementById("story-arc-refresh"),
+  highlightReel: document.getElementById("highlight-reel"),
   trendList: document.getElementById("trend-list"),
   trendButtons: document.querySelectorAll(".pill[data-trend]"),
   lastUpdated: document.getElementById("last-updated"),
@@ -173,6 +189,51 @@ function formatTime(value) {
   return date.toLocaleString();
 }
 
+function formatDateTimeLocal(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hour = pad(date.getHours());
+  const minute = pad(date.getMinutes());
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
+function getLatestDescriptionTime() {
+  const latest = state.descriptions[state.descriptions.length - 1];
+  return parseTimestamp(latest?.timestamp) || new Date();
+}
+
+function parseTimestamp(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function formatRelativeTime(value) {
+  const date = parseTimestamp(value);
+  if (!date) return "--";
+  const diffMs = Date.now() - date.getTime();
+  if (diffMs < 60000) return "just now";
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function formatDurationMinutes(minutes) {
+  if (!Number.isFinite(minutes) || minutes < 1) return "under 1 min";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
 function toDateKey(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -204,6 +265,18 @@ function renderTags(container, tags) {
   ];
   if (values.length === 0) return;
   values.slice(0, 8).forEach((tag) => {
+    const chip = document.createElement("span");
+    chip.className = "tag";
+    chip.textContent = tag;
+    container.appendChild(chip);
+  });
+}
+
+function renderTagList(container, tags) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!Array.isArray(tags) || tags.length === 0) return;
+  tags.slice(0, 8).forEach((tag) => {
     const chip = document.createElement("span");
     chip.className = "tag";
     chip.textContent = tag;
@@ -245,6 +318,140 @@ function tagsToText(tags) {
   return getTagValues(tags).join(" ").toLowerCase();
 }
 
+function getRecentDescriptions(descriptions, windowMinutes, maxItems) {
+  if (!Array.isArray(descriptions) || descriptions.length === 0) return [];
+  const latest = descriptions[descriptions.length - 1];
+  const latestTime = parseTimestamp(latest?.timestamp) || new Date();
+  const windowStart = new Date(latestTime.getTime() - windowMinutes * 60000);
+  const recent = [];
+  for (let i = descriptions.length - 1; i >= 0 && recent.length < maxItems; i -= 1) {
+    const item = descriptions[i];
+    const ts = parseTimestamp(item?.timestamp);
+    if (ts && ts < windowStart) {
+      break;
+    }
+    recent.push(item);
+  }
+  if (recent.length === 0) {
+    return descriptions.slice(-maxItems);
+  }
+  return recent.reverse();
+}
+
+function buildRecentTagSummary(items) {
+  const counts = new Map();
+  const groupCounts = { people: 0, vehicles: 0, objects: 0 };
+  items.forEach((item) => {
+    const tags = item?.tags || {};
+    if (Array.isArray(tags.people) && tags.people.length > 0) {
+      groupCounts.people += 1;
+    }
+    if (Array.isArray(tags.vehicles) && tags.vehicles.length > 0) {
+      groupCounts.vehicles += 1;
+    }
+    if (Array.isArray(tags.objects) && tags.objects.length > 0) {
+      groupCounts.objects += 1;
+    }
+    const uniqueTags = new Set(
+      getTagValues(tags)
+        .map((tag) => String(tag || "").toLowerCase())
+        .filter(Boolean)
+    );
+    uniqueTags.forEach((tag) => {
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    });
+  });
+
+  const topTags = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([tag]) => tag);
+
+  return { topTags, groupCounts };
+}
+
+function getLastSeen(descriptions) {
+  const result = { people: null, vehicles: null, objects: null };
+  if (!Array.isArray(descriptions)) return result;
+  for (let i = descriptions.length - 1; i >= 0; i -= 1) {
+    const tags = descriptions[i]?.tags || {};
+    if (!result.people && Array.isArray(tags.people) && tags.people.length > 0) {
+      result.people = descriptions[i]?.timestamp || null;
+    }
+    if (!result.vehicles && Array.isArray(tags.vehicles) && tags.vehicles.length > 0) {
+      result.vehicles = descriptions[i]?.timestamp || null;
+    }
+    if (!result.objects && Array.isArray(tags.objects) && tags.objects.length > 0) {
+      result.objects = descriptions[i]?.timestamp || null;
+    }
+    if (result.people && result.vehicles && result.objects) {
+      break;
+    }
+  }
+  return result;
+}
+
+function isNoChangeText(text) {
+  const value = String(text || "").toLowerCase();
+  return (
+    value.includes("no significant change") ||
+    value.includes("no meaningful change") ||
+    value.includes("no change")
+  );
+}
+
+function getLatestCompare(compareItems) {
+  if (!Array.isArray(compareItems) || compareItems.length === 0) return null;
+  const withTs = compareItems.filter((item) => item?.timestamp);
+  if (withTs.length === 0) {
+    return compareItems[compareItems.length - 1];
+  }
+  return withTs
+    .slice()
+    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+    .pop();
+}
+
+function getStabilitySummary(compareItems) {
+  if (!Array.isArray(compareItems) || compareItems.length === 0) {
+    return "Stability unknown";
+  }
+  const items = compareItems.slice();
+  items.sort((a, b) => {
+    const aTime = parseTimestamp(a?.timestamp);
+    const bTime = parseTimestamp(b?.timestamp);
+    if (!aTime || !bTime) return 0;
+    return aTime - bTime;
+  });
+  let count = 0;
+  let firstNoChange = null;
+  let lastNoChange = null;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (!isNoChangeText(items[i]?.text)) {
+      break;
+    }
+    count += 1;
+    const ts = parseTimestamp(items[i]?.timestamp);
+    if (ts) {
+      if (!lastNoChange) {
+        lastNoChange = ts;
+      }
+      firstNoChange = ts;
+    }
+  }
+  if (count === 0) {
+    return "Recent change detected";
+  }
+  let minutes = 0;
+  if (firstNoChange && lastNoChange) {
+    minutes = Math.round((lastNoChange - firstNoChange) / 60000);
+  }
+  if (!minutes || minutes < 1) {
+    minutes = count * 10;
+  }
+  return `Stable for ${formatDurationMinutes(minutes)}`;
+}
+
 function setHistoryQuery(value) {
   const nextValue = String(value || "").trim();
   state.historyQuery = nextValue;
@@ -279,6 +486,93 @@ function renderList(container, items, limit = 6) {
     wrapper.appendChild(timestamp);
     container.appendChild(wrapper);
   });
+}
+
+function renderStoryArc(container, data) {
+  if (!container) return;
+  container.replaceChildren();
+  const bullets = data?.bullets;
+  if (!Array.isArray(bullets) || bullets.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "story-arc-item";
+    empty.textContent = "No story arc yet.";
+    container.appendChild(empty);
+    return;
+  }
+  bullets.forEach((bullet) => {
+    const item = document.createElement("div");
+    item.className = "story-arc-item";
+    item.textContent = bullet;
+    container.appendChild(item);
+  });
+}
+
+function renderHighlightReel(container, data) {
+  if (!container) return;
+  container.replaceChildren();
+  const items = data?.items;
+  if (!Array.isArray(items) || items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "highlight-card";
+    const body = document.createElement("div");
+    body.className = "highlight-body";
+    body.textContent = "No highlights yet.";
+    empty.appendChild(body);
+    container.appendChild(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "highlight-card";
+
+    if (item.snapshot) {
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.src = snapshotUrl(item.snapshot);
+      img.alt = `Highlight ${formatTime(item.timestamp)}`;
+      card.appendChild(img);
+    }
+
+    const body = document.createElement("div");
+    body.className = "highlight-body";
+
+    const meta = document.createElement("span");
+    meta.className = "highlight-meta";
+    meta.textContent = formatTime(item.timestamp);
+
+    const text = document.createElement("p");
+    text.textContent = item.text || "No description available.";
+
+    body.appendChild(meta);
+    body.appendChild(text);
+
+    if (item.compare_text) {
+      const compare = document.createElement("div");
+      compare.className = "highlight-compare";
+      compare.textContent = item.compare_text;
+      body.appendChild(compare);
+    }
+
+    const tagsWrap = document.createElement("div");
+    tagsWrap.className = "tag-list";
+    renderTags(tagsWrap, item.tags);
+    if (tagsWrap.childElementCount > 0) {
+      body.appendChild(tagsWrap);
+    }
+
+    card.appendChild(body);
+    container.appendChild(card);
+  });
+}
+
+async function refreshStoryArc() {
+  if (!elements.storyArc) return;
+  try {
+    const data = await fetchJson("/api/story/daily");
+    renderStoryArc(elements.storyArc, data);
+  } catch (error) {
+    renderStoryArc(elements.storyArc, { bullets: [] });
+  }
 }
 
 function renderHistory(descriptions) {
@@ -405,22 +699,80 @@ function updateActiveNow(latestDescription) {
     if (elements.activeTags) {
       elements.activeTags.innerHTML = "<span class=\"subtle\">No tags yet.</span>";
     }
+    if (elements.activeChange) {
+      elements.activeChange.textContent = "--";
+    }
+    if (elements.activeStability) {
+      elements.activeStability.textContent = "--";
+    }
+    if (elements.activeLastSeen) {
+      elements.activeLastSeen.textContent = "--";
+    }
+    if (elements.activeTagsLabel) {
+      elements.activeTagsLabel.textContent = "Top tags";
+    }
     return;
   }
 
-  const peopleTags = latestDescription.tags?.people || [];
-  const hasPeople = Array.isArray(peopleTags) && peopleTags.length > 0;
-  elements.activeIndicator.textContent = hasPeople ? "People" : "Clear";
-  elements.activeLabel.textContent = hasPeople ? "People present" : "No people detected";
+  const recentDescriptions = getRecentDescriptions(
+    state.descriptions,
+    ACTIVE_WINDOW_MINUTES,
+    ACTIVE_WINDOW_MAX_ITEMS
+  );
+  const { topTags, groupCounts } = buildRecentTagSummary(recentDescriptions);
+  const hasPeople = groupCounts.people > 0;
+  const hasVehicles = groupCounts.vehicles > 0;
+  const hasObjects = groupCounts.objects > 0;
+  const hasActivity = hasPeople || hasVehicles || hasObjects;
+  elements.activeIndicator.textContent = hasPeople
+    ? "People"
+    : hasVehicles
+      ? "Vehicles"
+      : hasActivity
+        ? "Activity"
+        : "Clear";
+  elements.activeLabel.textContent = hasPeople
+    ? "People present"
+    : hasVehicles
+      ? "Vehicle activity"
+      : hasActivity
+        ? "Activity detected"
+        : "No activity detected";
   if (elements.activeTime) {
     elements.activeTime.textContent = formatTime(latestDescription.timestamp);
   }
-  elements.activeDot.className = `status-dot ${hasPeople ? "active" : "idle"}`;
+  elements.activeDot.className = `status-dot ${hasActivity ? "active" : "idle"}`;
   if (elements.activeTags) {
-    renderTags(elements.activeTags, latestDescription.tags);
+    renderTagList(elements.activeTags, topTags);
     if (elements.activeTags.childElementCount === 0) {
       elements.activeTags.innerHTML = "<span class=\"subtle\">No tags yet.</span>";
     }
+  }
+  if (elements.activeTagsLabel) {
+    elements.activeTagsLabel.textContent = `Top tags (last ${ACTIVE_WINDOW_MINUTES} min, ${recentDescriptions.length} snapshots)`;
+  }
+  if (elements.activeChange) {
+    const latestCompare = getLatestCompare(state.compare10m);
+    if (latestCompare?.text) {
+      const compareTime = latestCompare.timestamp ? formatTime(latestCompare.timestamp) : "";
+      elements.activeChange.textContent = compareTime
+        ? `${latestCompare.text} (${compareTime})`
+        : latestCompare.text;
+    } else {
+      elements.activeChange.textContent = "No recent comparison";
+    }
+  }
+  if (elements.activeStability) {
+    elements.activeStability.textContent = getStabilitySummary(state.compare10m);
+  }
+  if (elements.activeLastSeen) {
+    const lastSeen = getLastSeen(state.descriptions);
+    const parts = [
+      `People ${formatRelativeTime(lastSeen.people)}`,
+      `Vehicles ${formatRelativeTime(lastSeen.vehicles)}`,
+      `Objects ${formatRelativeTime(lastSeen.objects)}`,
+    ];
+    elements.activeLastSeen.textContent = parts.join(", ");
   }
 }
 
@@ -789,6 +1141,7 @@ async function loadDescriptions() {
     latestDescription?.text || "No description yet.";
   renderTags(elements.latestTags, latestDescription?.tags);
   updateActiveNow(latestDescription);
+  setRangeDefaults(state.descriptions);
   renderTrendList();
 
   renderHistory(state.descriptions);
@@ -809,6 +1162,76 @@ function updateAskUi() {
   if (!enabled) {
     setTextBlock(elements.askResponse, "Ask is disabled. Set ASK_ENABLED=true in .env to enable it.");
   }
+  if (elements.rangeStart) {
+    elements.rangeStart.disabled = !enabled;
+  }
+  if (elements.rangeEnd) {
+    elements.rangeEnd.disabled = !enabled;
+  }
+  if (elements.rangeRun) {
+    elements.rangeRun.disabled = !enabled;
+  }
+  if (!enabled && elements.rangeResponse) {
+    setTextBlock(
+      elements.rangeResponse,
+      "Range summaries are disabled. Set ASK_ENABLED=true in .env to enable them."
+    );
+  }
+}
+
+function getRangeBounds() {
+  if (!elements.rangeStart || !elements.rangeEnd) return null;
+  const startValue = elements.rangeStart.value;
+  const endValue = elements.rangeEnd.value;
+  if (!startValue || !endValue) return null;
+  const start = new Date(startValue);
+  const end = new Date(endValue);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  return { start, end };
+}
+
+function updateRangeMetaPreview() {
+  if (!elements.rangeMeta) return;
+  const bounds = getRangeBounds();
+  if (!bounds) {
+    elements.rangeMeta.textContent = "Select start and end";
+    return;
+  }
+  if (bounds.end <= bounds.start) {
+    elements.rangeMeta.textContent = "End must be after start";
+    return;
+  }
+  const count = state.descriptions.filter((item) => {
+    const ts = parseTimestamp(item.timestamp);
+    if (!ts) return false;
+    return ts >= bounds.start && ts <= bounds.end;
+  }).length;
+  elements.rangeMeta.textContent = `${count} snapshots in range`;
+}
+
+function setRangePreset(hours) {
+  if (!elements.rangeStart || !elements.rangeEnd) return;
+  const endDate = getLatestDescriptionTime();
+  const startDate = new Date(endDate.getTime() - hours * 60 * 60 * 1000);
+  elements.rangeEnd.value = formatDateTimeLocal(endDate);
+  elements.rangeStart.value = formatDateTimeLocal(startDate);
+  updateRangeMetaPreview();
+}
+
+function setRangeDefaults(descriptions) {
+  if (!elements.rangeStart || !elements.rangeEnd) return;
+  const latest = descriptions[descriptions.length - 1];
+  const latestDate = parseTimestamp(latest?.timestamp) || new Date();
+  const endValue = formatDateTimeLocal(latestDate);
+  const startDate = new Date(latestDate.getTime() - 2 * 60 * 60 * 1000);
+  const startValue = formatDateTimeLocal(startDate);
+  if (!elements.rangeEnd.value) {
+    elements.rangeEnd.value = endValue;
+  }
+  if (!elements.rangeStart.value) {
+    elements.rangeStart.value = startValue;
+  }
+  updateRangeMetaPreview();
 }
 
 async function runAsk() {
@@ -838,6 +1261,47 @@ async function runAsk() {
   }
 }
 
+async function runRangeSummary() {
+  if (!elements.rangeResponse || !elements.rangeRun) return;
+  const bounds = getRangeBounds();
+  if (!bounds) {
+    setTextBlock(elements.rangeResponse, "Select both start and end times.");
+    return;
+  }
+  if (bounds.end <= bounds.start) {
+    setTextBlock(elements.rangeResponse, "End time must be after start time.");
+    return;
+  }
+  elements.rangeRun.disabled = true;
+  setTextBlock(elements.rangeResponse, "Summarizing range...");
+  try {
+    const result = await fetchJson("/api/summary/range", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start: bounds.start.toISOString(),
+        end: bounds.end.toISOString(),
+      }),
+    });
+    const answer = result.answer || "No summary returned.";
+    const windowLabel = result.window?.label || "Selected range";
+    const snapshots = typeof result.window?.items === "number" ? result.window.items : null;
+    const comparisons = typeof result.window?.comparisons === "number" ? result.window.comparisons : null;
+    const metaParts = [windowLabel];
+    if (snapshots !== null) {
+      metaParts.push(`${snapshots} snapshots`);
+    }
+    if (comparisons !== null) {
+      metaParts.push(`${comparisons} comparisons`);
+    }
+    setTextBlock(elements.rangeResponse, answer, metaParts.join(" | "), "subtle");
+  } catch (error) {
+    setTextBlock(elements.rangeResponse, "Range summary failed. Check logs for details.");
+  } finally {
+    elements.rangeRun.disabled = false;
+  }
+}
+
 async function loadConfig() {
   try {
     const config = await fetchJson("/api/config");
@@ -861,13 +1325,24 @@ async function loadConfig() {
 
 async function loadData() {
   try {
-    const [health, latest, compare10m, compareHourly, dailyReports, usageSummary] = await Promise.all([
+    const [
+      health,
+      latest,
+      compare10m,
+      compareHourly,
+      dailyReports,
+      usageSummary,
+      storyArc,
+      highlightReel,
+    ] = await Promise.all([
       fetchJson("/api/health"),
       fetchJson("/api/snapshots/latest"),
       fetchJson("/api/compare/10m"),
       fetchJson("/api/compare/hourly"),
       fetchJson("/api/reports/daily"),
       fetchJson("/api/usage/summary"),
+      fetchJson("/api/story/daily"),
+      fetchJson("/api/highlights/daily"),
     ]);
 
     setHealth(health.status || "degraded");
@@ -882,6 +1357,7 @@ async function loadData() {
 
     renderList(elements.compare10m, compare10m);
     renderList(elements.compareHourly, compareHourly);
+    state.compare10m = Array.isArray(compare10m) ? compare10m : [];
 
     await loadDescriptions();
 
@@ -916,6 +1392,8 @@ async function loadData() {
     }
 
     renderUsageSummary(usageSummary);
+    renderStoryArc(elements.storyArc, storyArc);
+    renderHighlightReel(elements.highlightReel, highlightReel);
 
     state.lastUpdated = new Date();
     elements.lastUpdated.textContent = `Updated: ${state.lastUpdated.toLocaleTimeString()}`;
@@ -1022,6 +1500,36 @@ elements.compareRun.addEventListener("click", runCompare);
 
 if (elements.askRun) {
   elements.askRun.addEventListener("click", runAsk);
+}
+
+if (elements.rangeRun) {
+  elements.rangeRun.addEventListener("click", runRangeSummary);
+}
+
+if (elements.rangeStart) {
+  elements.rangeStart.addEventListener("change", updateRangeMetaPreview);
+}
+
+if (elements.rangeEnd) {
+  elements.rangeEnd.addEventListener("change", updateRangeMetaPreview);
+}
+
+if (elements.rangePresetButtons && elements.rangePresetButtons.length > 0) {
+  elements.rangePresetButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const hours = Number(button.dataset.rangeHours || 0);
+      if (!Number.isFinite(hours) || hours <= 0) {
+        return;
+      }
+      setRangePreset(hours);
+    });
+  });
+}
+
+if (elements.storyArcRefresh) {
+  elements.storyArcRefresh.addEventListener("click", () => {
+    refreshStoryArc();
+  });
 }
 
 if (elements.previewImage && elements.previewTime) {

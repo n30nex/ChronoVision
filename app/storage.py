@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, TypeVar
 
 try:
     import fcntl  # type: ignore
@@ -36,6 +36,12 @@ _RECORD_LISTS = {
 }
 _record_lock = threading.Lock()
 _migrated_record_lists: set[tuple[str, str]] = set()
+_record_db_init_lock = threading.Lock()
+_record_db_initialized: set[str] = set()
+_RECORD_DB_TIMEOUT_SEC = 30
+_RECORD_DB_BUSY_TIMEOUT_MS = 30_000
+
+T = TypeVar("T")
 
 
 
@@ -191,27 +197,86 @@ def _record_db_path(data_dir: Path) -> Path:
     return data_dir / _RECORD_DB_NAME
 
 
+def _is_sqlite_locked(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def _run_sqlite_with_retry(action: Callable[[], T], attempts: int = 6) -> T:
+    delay = 0.05
+    for attempt in range(attempts):
+        try:
+            return action()
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_locked(exc) or attempt >= attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+@contextmanager
+def _record_db_conn(db_path: Path):
+    conn = _run_sqlite_with_retry(
+        lambda: sqlite3.connect(str(db_path), timeout=_RECORD_DB_TIMEOUT_SEC)
+    )
+    try:
+        conn.execute(f"PRAGMA busy_timeout={_RECORD_DB_BUSY_TIMEOUT_MS}")
+        yield conn
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _init_record_db_pragmas(conn: sqlite3.Connection) -> None:
+    journal_mode = None
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        journal_mode = row[0] if row else None
+    except sqlite3.Error:
+        journal_mode = None
+
+    if str(journal_mode or "").lower() != "wal":
+        _run_sqlite_with_retry(lambda: conn.execute("PRAGMA journal_mode=WAL"))
+
+    conn.execute("PRAGMA synchronous=NORMAL")
+
+
 def _init_record_db(data_dir: Path) -> Path:
     db_path = _record_db_path(data_dir)
     ensure_dir(db_path.parent)
-    with sqlite3.connect(str(db_path), timeout=30) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS records ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "list_name TEXT NOT NULL, "
-            "timestamp TEXT, "
-            "timestamp_epoch REAL, "
-            "data TEXT NOT NULL"
-            ")"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_records_list_id ON records (list_name, id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_records_list_ts ON records (list_name, timestamp_epoch)"
-        )
+
+    resolved_key = str(db_path.resolve())
+    with _record_db_init_lock:
+        if resolved_key in _record_db_initialized:
+            return db_path
+
+    lock_path = db_path.with_suffix(db_path.suffix + ".lock")
+    with file_lock(lock_path):
+        with _record_db_init_lock:
+            if resolved_key in _record_db_initialized:
+                return db_path
+        with _record_db_conn(db_path) as conn:
+            _init_record_db_pragmas(conn)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS records ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "list_name TEXT NOT NULL, "
+                "timestamp TEXT, "
+                "timestamp_epoch REAL, "
+                "data TEXT NOT NULL"
+                ")"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_records_list_id ON records (list_name, id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_records_list_ts ON records (list_name, timestamp_epoch)"
+            )
+        with _record_db_init_lock:
+            _record_db_initialized.add(resolved_key)
     return db_path
 
 
@@ -237,7 +302,7 @@ def _maybe_migrate_record_list(data_dir: Path, list_name: str) -> None:
     json_path = data_dir / _RECORD_LISTS[list_name]
     if not json_path.exists():
         return
-    with sqlite3.connect(str(db_path), timeout=30) as conn:
+    with _record_db_conn(db_path) as conn:
         row = conn.execute(
             "SELECT 1 FROM records WHERE list_name = ? LIMIT 1",
             (list_name,),
@@ -278,7 +343,7 @@ def append_record(
     ts_value = item.get("timestamp") or item.get("ts")
     ts_epoch = _parse_iso_epoch(ts_value) if ts_value else None
     payload = json.dumps(item, ensure_ascii=True)
-    with sqlite3.connect(str(db_path), timeout=30) as conn:
+    with _record_db_conn(db_path) as conn:
         conn.execute(
             "INSERT INTO records (list_name, timestamp, timestamp_epoch, data) VALUES (?, ?, ?, ?)",
             (list_name, ts_value, ts_epoch, payload),
@@ -303,7 +368,7 @@ def fetch_records(
     elif offset:
         query += " LIMIT -1 OFFSET ?"
         params.append(max(0, offset))
-    with sqlite3.connect(str(db_path), timeout=30) as conn:
+    with _record_db_conn(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
     items = []
     for (payload,) in rows:
@@ -329,7 +394,7 @@ def fetch_records_since(
         "WHERE list_name = ? AND timestamp_epoch IS NOT NULL AND timestamp_epoch >= ? "
         "ORDER BY id ASC"
     )
-    with sqlite3.connect(str(db_path), timeout=30) as conn:
+    with _record_db_conn(db_path) as conn:
         rows = conn.execute(query, (list_name, cutoff_epoch)).fetchall()
     items = []
     for (payload,) in rows:
@@ -351,7 +416,7 @@ def prune_records(
     _maybe_migrate_record_list(data_dir, list_name)
     db_path = _init_record_db(data_dir)
     cutoff_epoch = cutoff.timestamp()
-    with sqlite3.connect(str(db_path), timeout=30) as conn:
+    with _record_db_conn(db_path) as conn:
         if dry_run:
             row = conn.execute(
                 "SELECT COUNT(*) FROM records "

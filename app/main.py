@@ -2,7 +2,7 @@ import os
 import queue
 import shutil
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +40,12 @@ runner = TaskRunner(settings, metrics)
 ASK_MAX_LOOKBACK_HOURS = 168
 ASK_MAX_ITEMS = 200
 DESCRIPTIONS_MAX_LIMIT = 2000
+RANGE_MAX_HOURS = 168
+RANGE_MAX_ITEMS = 400
+STORY_MAX_HOURS = 168
+STORY_MAX_ITEMS = 48
+HIGHLIGHT_MAX_HOURS = 168
+HIGHLIGHT_MAX_ITEMS = 1000
 
 
 def _is_api_key_valid(request: Request) -> bool:
@@ -69,6 +75,12 @@ class CompareRequest(BaseModel):
 class AskRequest(BaseModel):
     query: str
     lookback_hours: Optional[int] = None
+    max_items: Optional[int] = None
+
+
+class RangeSummaryRequest(BaseModel):
+    start: str
+    end: str
     max_items: Optional[int] = None
 
 
@@ -158,6 +170,19 @@ def _parse_iso(value):
         return None
 
 
+def _parse_range_value(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid datetime format") from exc
+    if parsed.tzinfo is None:
+        if hasattr(settings.tz, "localize"):
+            parsed = settings.tz.localize(parsed)
+        else:
+            parsed = parsed.replace(tzinfo=settings.tz)
+    return parsed.astimezone(timezone.utc)
+
+
 def _start_watchdog() -> None:
     handler = SnapshotHandler()
     observer = PollingObserver() if settings.camera_source == "windows-host" else Observer()
@@ -205,6 +230,12 @@ def _schedule_jobs() -> None:
             id="scan",
             replace_existing=True,
         )
+    scheduler.add_job(
+        runner.compare_recent,
+        IntervalTrigger(minutes=10),
+        id="compare_10m",
+        replace_existing=True,
+    )
     scheduler.add_job(
         runner.compare_hourly,
         CronTrigger(minute=0),
@@ -391,6 +422,48 @@ def api_ask(request: AskRequest):
     if result.get("error"):
         raise HTTPException(status_code=502, detail="ask failed")
     return result
+
+
+@app.post("/api/summary/range")
+def api_summary_range(request: RangeSummaryRequest):
+    if not settings.ask_enabled:
+        raise HTTPException(status_code=403, detail="ask disabled")
+    start = _parse_range_value(request.start)
+    end = _parse_range_value(request.end)
+    if end <= start:
+        raise HTTPException(status_code=400, detail="end must be after start")
+    if end - start > timedelta(hours=RANGE_MAX_HOURS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"range must be <= {RANGE_MAX_HOURS} hours",
+        )
+    max_items = request.max_items if request.max_items is not None else settings.ask_max_items
+    max_items = max(1, min(max_items, RANGE_MAX_ITEMS))
+    result = runner.summarize_range(start, end, max_items)
+    if result.get("error"):
+        raise HTTPException(status_code=502, detail="range summary failed")
+    return result
+
+
+@app.get("/api/story/daily")
+def api_story_daily(hours: int = 24, max_items: int = STORY_MAX_ITEMS):
+    if not settings.ask_enabled:
+        raise HTTPException(status_code=403, detail="ask disabled")
+    lookback_hours = max(1, min(hours, STORY_MAX_HOURS))
+    safe_max_items = max(1, min(max_items, STORY_MAX_ITEMS))
+    result = runner.story_arc(lookback_hours, safe_max_items)
+    if result.get("error"):
+        raise HTTPException(status_code=502, detail="story arc failed")
+    return result
+
+
+@app.get("/api/highlights/daily")
+def api_highlights_daily(hours: int = 24, max_items: int = HIGHLIGHT_MAX_ITEMS):
+    if not settings.ask_enabled:
+        raise HTTPException(status_code=403, detail="ask disabled")
+    lookback_hours = max(1, min(hours, HIGHLIGHT_MAX_HOURS))
+    safe_max_items = max(1, min(max_items, HIGHLIGHT_MAX_ITEMS))
+    return runner.highlight_reel(lookback_hours, safe_max_items)
 
 
 @app.get("/api/reports/daily")

@@ -88,6 +88,21 @@
                 <span id="active-time" class="subtle">--</span>
               </div>
             </div>
+            <div class="active-meta">
+              <div class="active-line">
+                <span class="active-kicker">Last change</span>
+                <span id="active-change" class="active-value">--</span>
+              </div>
+              <div class="active-line">
+                <span class="active-kicker">Scene stability</span>
+                <span id="active-stability" class="active-value">--</span>
+              </div>
+              <div class="active-line">
+                <span class="active-kicker">Last seen</span>
+                <span id="active-last-seen" class="active-value">--</span>
+              </div>
+            </div>
+            <p id="active-tags-label" class="subtle active-tags-label">Top tags</p>
             <div id="active-tags" class="tag-list"></div>
           </div>
         </section>
@@ -117,6 +132,47 @@
           </div>
           <div id="ask-response" class="ask-response">
             <p>Ask a question to get a Gemini answer based on recent snapshots.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card range-summary">
+        <div class="section-header">
+          <div>
+            <h2>Range Summary</h2>
+            <p class="subtle">Summarize activity for a time window.</p>
+          </div>
+          <span class="chip">Gemini</span>
+        </div>
+        <div class="range-body">
+          <div class="range-inputs">
+            <label class="subtle" for="range-start">Start</label>
+            <input id="range-start" class="range-input" type="datetime-local" />
+            <label class="subtle" for="range-end">End</label>
+            <input id="range-end" class="range-input" type="datetime-local" />
+            <div class="range-actions">
+              <button id="range-run" class="ghost">Summarize</button>
+              <span id="range-meta" class="subtle">--</span>
+            </div>
+            <div class="range-presets">
+              <span class="subtle">Presets</span>
+              <div class="toggle-group">
+                <button class="pill" data-range-hours="1">1h</button>
+                <button class="pill" data-range-hours="4">4h</button>
+                <button class="pill" data-range-hours="12">12h</button>
+                <button class="pill" data-range-hours="24">24h</button>
+              </div>
+            </div>
+            <div class="range-prompt">
+              <span class="subtle">Prompt</span>
+              <p id="range-prompt">
+                Describe in detail what occurred (what, who, where, when) during this time range. Include
+                comparisons and metadata from the range. Identify people consistently (Person 1, Child 1).
+              </p>
+            </div>
+          </div>
+          <div id="range-response" class="range-response">
+            <p>Select a time range to generate a detailed summary.</p>
           </div>
         </div>
       </section>
@@ -202,6 +258,33 @@
             <div id="daily-tags" class="tag-list"></div>
           </div>
           <div id="daily-highlights" class="highlight-list"></div>
+        </section>
+      </div>
+
+      <div class="insights-grid insights-grid--secondary">
+        <section class="card story-arc">
+          <div class="section-header">
+            <div>
+              <h2>Daily Story Arc</h2>
+              <p class="subtle">Timeline from hourly comparisons.</p>
+            </div>
+            <div class="section-actions">
+              <button id="story-arc-refresh" class="ghost">Refresh</button>
+              <span class="chip">Gemini</span>
+            </div>
+          </div>
+          <div id="story-arc" class="story-arc-list"></div>
+        </section>
+
+        <section class="card highlight-reel">
+          <div class="section-header">
+            <div>
+              <h2>Day Highlight Reel</h2>
+              <p class="subtle">Top snapshots by activity.</p>
+            </div>
+            <span class="chip">Top 3</span>
+          </div>
+          <div id="highlight-reel" class="highlight-reel-list"></div>
         </section>
       </div>
 

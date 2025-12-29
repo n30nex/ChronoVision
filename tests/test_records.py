@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timedelta, timezone
 
 from app import storage
@@ -36,3 +37,27 @@ def test_prune_records(tmp_path):
     remaining = storage.fetch_records(tmp_path, "usage")
     assert len(remaining) == 1
     assert remaining[0]["text"] == "new"
+
+
+def test_concurrent_appends_are_resilient(tmp_path):
+    now = datetime.now(timezone.utc)
+    barrier = threading.Barrier(6)
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            barrier.wait(timeout=5)
+            record = {"timestamp": _iso(now + timedelta(seconds=index)), "text": f"t{index}"}
+            storage.append_record(tmp_path, "usage", record)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    records = storage.fetch_records(tmp_path, "usage")
+    assert len(records) == 6

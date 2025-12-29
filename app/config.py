@@ -29,6 +29,7 @@ def _parse_int(value: Optional[str], default: int) -> int:
 class Settings:
     groq_api_key: str
     google_api_key: str
+    api_key: str
     groq_model: str
     google_model: str
     timezone: str
@@ -108,6 +109,7 @@ def load_settings() -> Settings:
 
     groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
     google_api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    api_key = os.getenv("API_KEY", "").strip()
 
     timezone = os.getenv("TIMEZONE", "America/New_York")
     tz = pytz.timezone(timezone)
@@ -115,6 +117,7 @@ def load_settings() -> Settings:
     settings = Settings(
         groq_api_key=groq_api_key,
         google_api_key=google_api_key,
+        api_key=api_key,
         groq_model=os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
         google_model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"),
         timezone=timezone,

@@ -14,6 +14,7 @@
 4. For container-only runs, use `docker compose up -d --build`.
 5. Open `http://localhost:8080`.
 6. Stop everything with `stop.ps1` when needed.
+7. If `API_KEY` is set, the UI will prompt for it on first load (stored in browser localStorage).
 
 ## Configuration Reference
 All settings live in `.env`. See `.env.example` for defaults.
@@ -27,10 +28,12 @@ Key additions:
 - `ASK_MAX_ITEMS`: max snapshots used to answer a question.
 - `PREVIEW_COOLDOWN_SEC`: minimum seconds between live preview captures.
 - `GROQ_COST_PER_MILLION_INPUT/OUTPUT`, `GEMINI_COST_PER_MILLION_INPUT/OUTPUT`: cost tracking rates.
+- `API_KEY`: optional shared secret required for `/api/*` and `/data/*` access (send as `X-API-Key` header or `api_key` query param).
 
 ## Architecture Overview
 - Windows host capture script writes snapshots to `data/snapshots/`.
 - Container processes snapshots and serves the API + UI.
+- Snapshot metadata is stored in `data/records.db` (SQLite) and migrated automatically from legacy JSON lists on first read/write.
 
 ## API Endpoints
 - `GET /api/health`: health status and last API calls.
@@ -55,6 +58,7 @@ Key additions:
 
 ## Development
 - Use `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`.
+- For local tests, run `python -m pip install -e .` once to make `app` importable, then `pytest`.
 
 ## Backup and Recovery
 - Use `scripts/backup.ps1` and keep archives in `data/backups/`.

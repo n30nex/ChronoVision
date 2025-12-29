@@ -7,6 +7,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $runDir = Join-Path $repoRoot "data\\run"
 $logDir = Join-Path $repoRoot "data\\logs"
+$envPath = Join-Path $repoRoot ".env"
 $statePath = Join-Path $runDir "tray_state.json"
 $pidPath = Join-Path $runDir "capture.pid"
 $trayPidPath = Join-Path $runDir "tray.pid"
@@ -15,6 +16,27 @@ $healthUrl = "http://localhost:8080/api/health"
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+function Read-EnvFile($path) {
+  $map = @{}
+  if (-not (Test-Path $path)) {
+    return $map
+  }
+  Get-Content $path | ForEach-Object {
+    $line = $_.Trim()
+    if (-not $line -or $line.StartsWith("#")) { return }
+    $parts = $line -split "=", 2
+    if ($parts.Length -eq 2) {
+      $key = $parts[0].Trim()
+      $value = $parts[1].Trim()
+      $map[$key] = $value
+    }
+  }
+  return $map
+}
+
+$envMap = Read-EnvFile $envPath
+$apiKey = $envMap["API_KEY"]
 
 $mutexCreated = $false
 $mutex = New-Object System.Threading.Mutex($true, "Global\SnapshotVisionTray", [ref]$mutexCreated)
@@ -87,7 +109,15 @@ function Show-Logs {
 
 function Update-Status {
   try {
-    $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
+    $headers = @{}
+    if ($apiKey) {
+      $headers["X-API-Key"] = $apiKey
+    }
+    if ($headers.Count -gt 0) {
+      $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2 -Headers $headers
+    } else {
+      $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
+    }
     $data = $response.Content | ConvertFrom-Json
     $status = $data.status
     $notifyIcon.Text = "Snapshot Vision: $status"

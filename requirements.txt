@@ -1,0 +1,9 @@
+﻿fastapi
+uvicorn
+apscheduler
+loguru
+watchdog
+pytz
+python-dotenv
+httpx
+Pillow

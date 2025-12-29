@@ -1,0 +1,11 @@
+﻿services:
+  vision-app:
+    environment:
+      - LOG_LEVEL=DEBUG
+      - HOT_RELOAD=true
+    ports:
+      - "5678:5678"
+    volumes:
+      - ./app:/app/app:ro
+      - ./web:/web:ro
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]

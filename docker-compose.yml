@@ -1,0 +1,17 @@
+﻿services:
+  vision-app:
+    build: .
+    container_name: vision-app
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import httpx; r=httpx.get('http://localhost:8080/api/health', timeout=2); raise SystemExit(0 if r.status_code < 500 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

@@ -1,0 +1,284 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snapshot Vision</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Sora:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/web/styles.css" />
+    <script src="/web/app.js" defer></script>
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="bg-grid"></div>
+    <header class="top-bar">
+      <div>
+        <p class="eyebrow">Windows-first LLM vision</p>
+        <h1>
+          Snapshot Pulse
+          <span class="version-chip">v1.0</span>
+        </h1>
+      </div>
+      <div class="status-block">
+        <div id="health-indicator" class="health-indicator">Checking</div>
+        <button id="refresh-btn" class="ghost">Refresh</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <div class="hero-grid">
+        <section class="card hero">
+          <div class="hero-header">
+            <div>
+              <h2>Latest Snapshot</h2>
+              <p class="subtle">Most recent capture and summary.</p>
+            </div>
+            <div class="meta">
+              <span id="latest-time">--</span>
+              <span id="last-updated">Updated: --</span>
+            </div>
+          </div>
+          <div class="hero-body">
+            <div class="image-frame">
+              <img id="latest-image" alt="Latest snapshot" />
+            </div>
+            <div class="hero-copy">
+              <h3>Scene Description</h3>
+              <p id="latest-description">Waiting for data...</p>
+              <div id="latest-tags" class="tag-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card live-preview">
+          <div class="section-header">
+            <div>
+              <h2>Live Preview</h2>
+              <p class="subtle">Single frame on refresh.</p>
+            </div>
+            <span class="chip">Live</span>
+          </div>
+          <div class="preview-body">
+            <div class="image-frame preview-frame">
+              <img id="preview-image" alt="Live preview" />
+            </div>
+            <span id="preview-time" class="subtle">--</span>
+          </div>
+        </section>
+
+        <section class="card active-now">
+          <div class="section-header">
+            <div>
+              <h2>Active Now</h2>
+              <p class="subtle">Latest tags and presence.</p>
+            </div>
+            <span id="active-indicator" class="chip">--</span>
+          </div>
+          <div class="active-body">
+            <div class="active-status">
+              <span class="status-dot" id="active-dot"></span>
+              <div>
+                <h3 id="active-label">--</h3>
+                <span id="active-time" class="subtle">--</span>
+              </div>
+            </div>
+            <div id="active-tags" class="tag-list"></div>
+          </div>
+        </section>
+      </div>
+
+      <section id="ask-card" class="card ask">
+        <div class="section-header">
+          <div>
+            <h2>Ask the Feed</h2>
+            <p class="subtle">Ask about recent activity and context.</p>
+          </div>
+          <span class="chip">Gemini</span>
+        </div>
+        <div class="ask-body">
+          <div class="ask-inputs">
+            <label class="subtle" for="ask-query">Question</label>
+            <textarea
+              id="ask-query"
+              class="ask-textarea"
+              rows="3"
+              placeholder="When did the lights turn on?"
+            ></textarea>
+            <div class="ask-actions">
+              <button id="ask-run" class="ghost">Ask</button>
+              <span id="ask-window" class="subtle">Last 24 hours</span>
+            </div>
+          </div>
+          <div id="ask-response" class="ask-response">
+            <p>Ask a question to get a Gemini answer based on recent snapshots.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card trends">
+        <div class="section-header">
+          <div>
+            <h2>Tag Trends</h2>
+            <p class="subtle">Top tags by activity.</p>
+          </div>
+          <div class="toggle-group">
+            <button class="pill active" data-trend="hourly">Hourly</button>
+            <button class="pill" data-trend="daily">Daily</button>
+          </div>
+        </div>
+        <div id="trend-list" class="trend-list">
+          <div class="trend-empty">Collecting tag data...</div>
+        </div>
+      </section>
+
+      <section class="card timelapse">
+        <div class="section-header">
+          <h2>Timelapse Playback</h2>
+          <div class="toggle-group">
+            <button class="pill active" data-mode="daily">Daily</button>
+            <button class="pill" data-mode="hourly">Hourly</button>
+          </div>
+        </div>
+        <div class="timelapse-controls">
+          <label class="timelapse-select">
+            <span class="subtle">Day</span>
+            <select id="timelapse-day"></select>
+          </label>
+          <div class="timelapse-scrubber">
+            <input id="timelapse-range" type="range" min="0" max="0" value="0" />
+            <div class="timelapse-meta">
+              <span id="timelapse-time">--</span>
+              <span id="timelapse-count">0 / 0</span>
+            </div>
+            <div id="timelapse-tags" class="tag-list tag-list--compact"></div>
+            <p class="scrub-hint">Click or drag to scrub the timeline.</p>
+          </div>
+          <button id="timelapse-play" class="ghost">Play</button>
+        </div>
+        <div class="timelapse-body">
+          <div class="image-frame">
+            <img id="timelapse-image" alt="Timelapse frame" />
+          </div>
+          <div class="timelapse-copy">
+            <h3>Frame Description</h3>
+            <p id="timelapse-description">Select a frame to begin.</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="insights-grid">
+        <section class="card timeline">
+          <div class="section-header">
+            <h2>10-Minute Changes</h2>
+            <span class="chip">Gemini</span>
+          </div>
+          <div id="compare-10m" class="list"></div>
+        </section>
+
+        <section class="card timeline">
+          <div class="section-header">
+            <h2>Hourly Changes</h2>
+            <span class="chip">Gemini</span>
+          </div>
+          <div id="compare-hourly" class="list"></div>
+        </section>
+
+        <section class="card report">
+          <div class="section-header">
+            <h2>Daily Report</h2>
+            <span class="chip">Latest</span>
+          </div>
+          <div id="daily-report" class="report-body">
+            <p>Waiting for daily summary...</p>
+          </div>
+          <div class="daily-tags">
+            <p class="subtle">Top tags today</p>
+            <div id="daily-tags" class="tag-list"></div>
+          </div>
+          <div id="daily-highlights" class="highlight-list"></div>
+        </section>
+      </div>
+
+      <section class="card compare">
+        <div class="section-header">
+          <h2>Compare Any Two Times</h2>
+          <span class="chip">Gemini</span>
+        </div>
+        <div class="compare-controls">
+          <div class="compare-selects">
+            <label>
+              <span class="subtle">Snapshot A</span>
+              <select id="compare-a"></select>
+            </label>
+            <label>
+              <span class="subtle">Snapshot B</span>
+              <select id="compare-b"></select>
+            </label>
+          </div>
+          <button id="compare-run" class="ghost">Run Compare</button>
+        </div>
+        <div class="compare-previews">
+          <div class="compare-image">
+            <img id="compare-image-a" alt="Snapshot A preview" />
+            <span id="compare-time-a" class="subtle">--</span>
+          </div>
+          <div class="compare-image">
+            <img id="compare-image-b" alt="Snapshot B preview" />
+            <span id="compare-time-b" class="subtle">--</span>
+          </div>
+        </div>
+        <div id="compare-result" class="compare-result">
+          <p>Select two snapshots to compare.</p>
+        </div>
+      </section>
+
+      <section class="card cost">
+        <div class="section-header">
+          <h2>Cost & Usage</h2>
+          <span class="chip">Last 7 days</span>
+        </div>
+        <div class="cost-summary" id="cost-summary">
+          <div>
+            <h3>Total Tokens</h3>
+            <p id="cost-total-tokens">0</p>
+          </div>
+          <div>
+            <h3>Total Cost</h3>
+            <p id="cost-total-usd">$0.00</p>
+          </div>
+        </div>
+        <div id="cost-providers" class="cost-providers"></div>
+        <div id="cost-days" class="cost-days"></div>
+      </section>
+
+      <section class="card history">
+        <div class="history-header">
+          <div>
+            <h2>Snapshot History</h2>
+            <p class="subtle">Browse previous snapshots and descriptions.</p>
+          </div>
+          <div class="history-actions">
+            <input
+              id="history-search"
+              class="history-input"
+              type="search"
+              placeholder="Search descriptions..."
+            />
+            <button id="history-more" class="ghost">Load more</button>
+          </div>
+        </div>
+        <div class="history-meta">
+          <span id="history-count">0 items</span>
+          <span class="subtle">Newest first</span>
+        </div>
+        <div id="history-list" class="history-list"></div>
+      </section>
+    </main>
+  </body>
+</html>

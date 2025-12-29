@@ -18,6 +18,7 @@ from .usage import record_usage
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+RTSP_CAPTURE_TIMEOUT_SEC = 30
 
 
 def now_utc_iso() -> str:
@@ -288,9 +289,20 @@ class TaskRunner:
             str(temp_path),
         ]
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=RTSP_CAPTURE_TIMEOUT_SEC,
+            )
             temp_path.replace(target)
             return target
+        except subprocess.TimeoutExpired:
+            logger.error("RTSP capture timed out after {seconds}s", seconds=RTSP_CAPTURE_TIMEOUT_SEC)
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            return None
         except Exception as exc:  # noqa: BLE001
             logger.error("RTSP capture failed: {error}", error=str(exc))
             if temp_path.exists():
@@ -514,7 +526,7 @@ class TaskRunner:
             "prompt_version": prompts.PROMPT_VERSION,
             "latency_ms": round(latency, 2),
         }
-        storage.append_json_list(self.settings.data_dir / "compare_custom.json", record)
+        storage.append_record(self.settings.data_dir, "compare_custom", record)
         if usage:
             record_usage(
                 self.settings,
@@ -580,16 +592,8 @@ class TaskRunner:
         }
 
     def daily_report(self) -> None:
-        report_path = self.settings.data_dir / "compare_hourly.json"
-        items = storage.read_json(report_path, [])
-        if not isinstance(items, list):
-            return
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        recent = []
-        for item in items:
-            parsed = _parse_iso(item.get("timestamp"))
-            if parsed and parsed >= cutoff:
-                recent.append(item)
+        recent = storage.fetch_records_since(self.settings.data_dir, "compare_hourly", cutoff)
         if not recent:
             return
 
@@ -615,7 +619,7 @@ class TaskRunner:
         }
         output_path = self.settings.daily_reports_dir / f"{local_label}.json"
         storage.atomic_write_json(output_path, report)
-        storage.append_json_list(self.settings.data_dir / "daily_reports.json", report)
+        storage.append_record(self.settings.data_dir, "daily_reports", report)
 
         if usage:
             record_usage(
@@ -652,8 +656,8 @@ class TaskRunner:
         out_dir = self.settings.compare_10m_dir if label == "10-minute" else self.settings.compare_hourly_dir
         out_path = _json_path_for_snapshot(path_b, self.settings.snapshots_dir, out_dir)
         storage.atomic_write_json(out_path, record)
-        list_name = "compare_10m.json" if label == "10-minute" else "compare_hourly.json"
-        storage.append_json_list(self.settings.data_dir / list_name, record)
+        list_name = "compare_10m" if label == "10-minute" else "compare_hourly"
+        storage.append_record(self.settings.data_dir, list_name, record)
 
         if usage:
             record_usage(
@@ -802,7 +806,7 @@ class TaskRunner:
         }
         out_path = _json_path_for_snapshot(path, self.settings.snapshots_dir, self.settings.descriptions_dir)
         storage.atomic_write_json(out_path, record)
-        storage.append_json_list(self.settings.data_dir / "descriptions.json", record)
+        storage.append_record(self.settings.data_dir, "descriptions", record)
 
     def _mark_processed(self, path: Path, timestamp: str) -> None:
         self.last_processed_path = path
@@ -846,15 +850,7 @@ def _parse_iso(value: Optional[str]):
 
 
 def _filter_descriptions(settings, cutoff: datetime) -> list[dict]:
-    items = storage.read_json(settings.data_dir / "descriptions.json", [])
-    if not isinstance(items, list):
-        return []
-    recent = []
-    for item in items:
-        parsed = _parse_iso(item.get("timestamp"))
-        if parsed and parsed >= cutoff:
-            recent.append(item)
-    return recent
+    return storage.fetch_records_since(settings.data_dir, "descriptions", cutoff)
 
 
 def _aggregate_tags(items: list[dict]) -> dict[str, list[tuple[str, int]]]:

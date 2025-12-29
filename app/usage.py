@@ -30,14 +30,12 @@ def record_usage(
         "total_tokens": total_tokens,
         "cost_usd": round(cost_usd, 6),
     }
-    storage.append_json_list(settings.data_dir / "usage.json", record)
+    storage.append_record(settings.data_dir, "usage", record)
 
 
 def summarize_usage(settings, days: int = 7) -> dict[str, Any]:
-    records = storage.read_json(settings.data_dir / "usage.json", [])
-    if not isinstance(records, list):
-        records = []
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    records = storage.fetch_records_since(settings.data_dir, "usage", cutoff)
 
     totals = _empty_totals()
     by_provider: dict[str, dict[str, float]] = defaultdict(_empty_totals)
@@ -45,7 +43,7 @@ def summarize_usage(settings, days: int = 7) -> dict[str, Any]:
 
     for record in records:
         timestamp = _parse_iso(record.get("timestamp"))
-        if timestamp is None or timestamp < cutoff:
+        if timestamp is None:
             continue
         provider = record.get("provider", "unknown")
         date_key = timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d")

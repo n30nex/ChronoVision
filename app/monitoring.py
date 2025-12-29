@@ -104,4 +104,4 @@ def _iso_to_epoch(timestamp: str) -> float:
         parsed = timestamp.replace("Z", "+00:00")
         return datetime.fromisoformat(parsed).timestamp()
     except ValueError:
-        return time.time()
+        return 0.0

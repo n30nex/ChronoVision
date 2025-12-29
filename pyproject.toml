@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snapshot-vision"
+version = "1.0"
+description = "Snapshot Vision System"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "apscheduler",
+  "loguru",
+  "watchdog",
+  "pytz",
+  "python-dotenv",
+  "httpx",
+  "Pillow",
+]
+
+[tool.setuptools]
+packages = ["app"]

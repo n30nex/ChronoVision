@@ -12,20 +12,25 @@ def cleanup(settings, dry_run: bool = False, archive: bool = False) -> None:
     snapshots = storage.list_snapshot_files(settings.snapshots_dir)
     snapshots_sorted = sorted(snapshots, key=lambda p: p.stat().st_mtime)
 
-    keep = set(snapshots_sorted[-settings.retention_min_snapshots :])
+    keep_count = max(settings.retention_min_snapshots, 0)
+    keep = set(snapshots_sorted[-keep_count:]) if keep_count else set()
     for path in snapshots_sorted:
         snapshot_time = _parse_snapshot_time(path, settings)
         if path in keep:
             continue
         if snapshot_time and snapshot_time > cutoff:
             continue
-        _remove_path(path, settings, dry_run, archive)
+        _remove_snapshot_bundle(path, settings, dry_run, archive)
 
-    _prune_json_list(settings.data_dir / "descriptions.json", cutoff, dry_run)
-    _prune_json_list(settings.data_dir / "compare_10m.json", cutoff, dry_run)
-    _prune_json_list(settings.data_dir / "compare_hourly.json", cutoff, dry_run)
-    _prune_json_list(settings.data_dir / "daily_reports.json", cutoff, dry_run)
-    _prune_json_list(settings.data_dir / "usage.json", cutoff, dry_run)
+    for list_name in [
+        "descriptions",
+        "compare_10m",
+        "compare_hourly",
+        "compare_custom",
+        "daily_reports",
+        "usage",
+    ]:
+        _prune_records_list(settings, list_name, cutoff, dry_run)
 
 
 def _remove_path(path: Path, settings, dry_run: bool, archive: bool) -> None:
@@ -34,8 +39,12 @@ def _remove_path(path: Path, settings, dry_run: bool, archive: bool) -> None:
         return
     if archive:
         archive_dir = settings.backups_dir / "retention"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        target = archive_dir / path.name
+        try:
+            relative_path = path.relative_to(settings.data_dir)
+            target = archive_dir / relative_path
+        except ValueError:
+            target = archive_dir / path.name
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), str(target))
         logger.info("Archived {path} -> {target}", path=str(path), target=str(target))
         return
@@ -46,28 +55,31 @@ def _remove_path(path: Path, settings, dry_run: bool, archive: bool) -> None:
         logger.warning("Failed to remove {path}: {error}", path=str(path), error=str(exc))
 
 
-def _prune_json_list(list_path: Path, cutoff: datetime, dry_run: bool) -> None:
-    items = storage.read_json(list_path, [])
-    if not isinstance(items, list):
+def _remove_snapshot_bundle(path: Path, settings, dry_run: bool, archive: bool) -> None:
+    _remove_path(path, settings, dry_run, archive)
+    try:
+        relative = path.relative_to(settings.snapshots_dir)
+    except ValueError:
         return
-    kept = []
-    for item in items:
-        timestamp = item.get("timestamp") or item.get("ts")
-        if not timestamp:
-            kept.append(item)
-            continue
-        try:
-            ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        except ValueError:
-            kept.append(item)
-            continue
-        if ts >= cutoff:
-            kept.append(item)
-    if dry_run:
-        logger.info("Retention dry-run: would prune {path} from {before} to {after}",
-                    path=str(list_path), before=len(items), after=len(kept))
-        return
-    storage.write_json_list(list_path, kept)
+    json_relative = relative.with_suffix(".json")
+    derived_paths = [
+        settings.descriptions_dir / json_relative,
+        settings.compare_10m_dir / json_relative,
+        settings.compare_hourly_dir / json_relative,
+    ]
+    for derived in derived_paths:
+        if derived.exists():
+            _remove_path(derived, settings, dry_run, archive)
+
+
+def _prune_records_list(settings, list_name: str, cutoff: datetime, dry_run: bool) -> None:
+    removed = storage.prune_records(settings.data_dir, list_name, cutoff, dry_run=dry_run)
+    if dry_run and removed:
+        logger.info(
+            "Retention dry-run: would prune {list_name}: {count} records",
+            list_name=list_name,
+            count=removed,
+        )
 
 
 def _parse_snapshot_time(path: Path, settings):

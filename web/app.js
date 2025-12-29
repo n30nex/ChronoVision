@@ -21,6 +21,8 @@
   },
 };
 
+const API_KEY_STORAGE = "snapshotVisionApiKey";
+
 const elements = {
   health: document.getElementById("health-indicator"),
   latestImage: document.getElementById("latest-image"),
@@ -80,8 +82,84 @@ const usdFormatter = new Intl.NumberFormat("en-US", {
   currency: "USD",
 });
 
-async function fetchJson(url, options) {
-  const response = await fetch(url, { cache: "no-store", ...options });
+let apiKeyPromptOpen = false;
+let apiKeyLastUpdated = 0;
+
+function getApiKey() {
+  return localStorage.getItem(API_KEY_STORAGE) || "";
+}
+
+function setApiKey(value) {
+  const cleaned = String(value || "").trim();
+  if (!cleaned) {
+    localStorage.removeItem(API_KEY_STORAGE);
+    apiKeyLastUpdated = 0;
+    return "";
+  }
+  localStorage.setItem(API_KEY_STORAGE, cleaned);
+  apiKeyLastUpdated = Date.now();
+  return cleaned;
+}
+
+function promptForApiKey(message = "Enter API key for Snapshot Vision:") {
+  if (apiKeyPromptOpen) {
+    return "";
+  }
+  apiKeyPromptOpen = true;
+  const input = window.prompt(message);
+  apiKeyPromptOpen = false;
+  if (input === null) return "";
+  return setApiKey(input);
+}
+
+function withApiKey(url) {
+  const apiKey = getApiKey();
+  if (!apiKey) return url;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    parsed.searchParams.set("api_key", apiKey);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch (error) {
+    return url;
+  }
+}
+
+function setTextBlock(container, text, meta = null, metaClass = "subtle") {
+  if (!container) return;
+  container.replaceChildren();
+  const message = document.createElement("p");
+  message.textContent = text;
+  container.appendChild(message);
+  if (meta) {
+    const metaEl = document.createElement("span");
+    if (metaClass) {
+      metaEl.className = metaClass;
+    }
+    metaEl.textContent = meta;
+    container.appendChild(metaEl);
+  }
+}
+
+async function fetchJson(url, options = {}, allowRetry = true) {
+  const headers = new Headers(options.headers || {});
+  const apiKey = getApiKey();
+  if (apiKey) {
+    headers.set("X-API-Key", apiKey);
+  }
+  const response = await fetch(url, { cache: "no-store", ...options, headers });
+  if (response.status === 401 && allowRetry) {
+    const currentKey = getApiKey();
+    if (currentKey && Date.now() - apiKeyLastUpdated < 5000) {
+      return fetchJson(url, options, false);
+    }
+    const promptMessage = currentKey
+      ? "API key invalid. Enter API key:"
+      : "API key required. Enter API key:";
+    const updatedKey = promptForApiKey(promptMessage);
+    if (updatedKey) {
+      return fetchJson(url, options, false);
+    }
+  }
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -104,9 +182,9 @@ function toDateKey(date) {
 
 function snapshotUrl(path) {
   if (!path) return "";
-  if (path.startsWith("/data/")) return path;
+  if (path.startsWith("/data/")) return withApiKey(path);
   const trimmed = path.replace(/^\/+/, "");
-  return `/data/${trimmed}`;
+  return withApiKey(`/data/${trimmed}`);
 }
 
 function setHealth(status) {
@@ -178,9 +256,14 @@ function setHistoryQuery(value) {
 }
 
 function renderList(container, items, limit = 6) {
-  container.innerHTML = "";
-  if (!items || items.length === 0) {
-    container.innerHTML = "<div class=\"list-item\"><strong>No entries yet</strong></div>";
+  container.replaceChildren();
+  if (!Array.isArray(items) || items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "list-item";
+    const label = document.createElement("strong");
+    label.textContent = "No entries yet";
+    empty.appendChild(label);
+    container.appendChild(empty);
     return;
   }
   const slice = items.slice(-limit).reverse();
@@ -188,7 +271,12 @@ function renderList(container, items, limit = 6) {
     const wrapper = document.createElement("div");
     wrapper.className = "list-item";
     const time = formatTime(item.timestamp || item.ts);
-    wrapper.innerHTML = `<strong>${item.text || "No data"}</strong><span>${time}</span>`;
+    const title = document.createElement("strong");
+    title.textContent = item.text || "No data";
+    const timestamp = document.createElement("span");
+    timestamp.textContent = time;
+    wrapper.appendChild(title);
+    wrapper.appendChild(timestamp);
     container.appendChild(wrapper);
   });
 }
@@ -624,25 +712,24 @@ async function runCompare() {
   const snapshotA = elements.compareSelectA.value;
   const snapshotB = elements.compareSelectB.value;
   if (!snapshotA || !snapshotB) {
-    elements.compareResult.innerHTML = "<p>Select two snapshots first.</p>";
+    setTextBlock(elements.compareResult, "Select two snapshots first.");
     return;
   }
   if (snapshotA === snapshotB) {
-    elements.compareResult.innerHTML = "<p>Please choose two different snapshots.</p>";
+    setTextBlock(elements.compareResult, "Please choose two different snapshots.");
     return;
   }
-  elements.compareResult.innerHTML = "<p>Running comparison...</p>";
+  setTextBlock(elements.compareResult, "Running comparison...");
   try {
     const result = await fetchJson("/api/compare/custom", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ snapshot_a: snapshotA, snapshot_b: snapshotB }),
     });
-    elements.compareResult.innerHTML = `<p>${result.text}</p><span class=\"subtle\">${formatTime(
-      result.timestamp
-    )}</span>`;
+    const message = result.text || "No comparison text returned.";
+    setTextBlock(elements.compareResult, message, formatTime(result.timestamp), "subtle");
   } catch (error) {
-    elements.compareResult.innerHTML = "<p>Comparison failed. Check logs.</p>";
+    setTextBlock(elements.compareResult, "Comparison failed. Check logs.");
   }
 }
 
@@ -651,23 +738,33 @@ function renderUsageSummary(summary) {
   elements.costTotalTokens.textContent = summary.totals.total_tokens.toLocaleString();
   elements.costTotalUsd.textContent = usdFormatter.format(summary.totals.cost_usd || 0);
 
-  elements.costProviders.innerHTML = "";
+  elements.costProviders.replaceChildren();
   Object.entries(summary.by_provider || {}).forEach(([provider, data]) => {
     const row = document.createElement("div");
     row.className = "cost-provider";
-    row.innerHTML = `<strong>${provider}</strong><span>${data.total_tokens.toLocaleString()} tokens / ${usdFormatter.format(
+    const label = document.createElement("strong");
+    label.textContent = provider;
+    const value = document.createElement("span");
+    value.textContent = `${data.total_tokens.toLocaleString()} tokens / ${usdFormatter.format(
       data.cost_usd || 0
-    )}</span>`;
+    )}`;
+    row.appendChild(label);
+    row.appendChild(value);
     elements.costProviders.appendChild(row);
   });
 
-  elements.costDays.innerHTML = "";
+  elements.costDays.replaceChildren();
   (summary.by_day || []).forEach((day) => {
     const row = document.createElement("div");
     row.className = "cost-day";
-    row.innerHTML = `<span>${day.date}</span><span>${day.total_tokens.toLocaleString()} tokens / ${usdFormatter.format(
+    const label = document.createElement("span");
+    label.textContent = day.date;
+    const value = document.createElement("span");
+    value.textContent = `${day.total_tokens.toLocaleString()} tokens / ${usdFormatter.format(
       day.cost_usd || 0
-    )}</span>`;
+    )}`;
+    row.appendChild(label);
+    row.appendChild(value);
     elements.costDays.appendChild(row);
   });
 }
@@ -675,7 +772,7 @@ function renderUsageSummary(summary) {
 function loadPreview() {
   if (!elements.previewImage || !elements.previewTime) return;
   elements.previewTime.textContent = "Capturing...";
-  elements.previewImage.src = `/api/preview?ts=${Date.now()}`;
+  elements.previewImage.src = withApiKey(`/api/preview?ts=${Date.now()}`);
 }
 
 async function loadDescriptions() {
@@ -710,8 +807,7 @@ function updateAskUi() {
     elements.askWindow.textContent = `Last ${state.ask.lookbackHours} hours`;
   }
   if (!enabled) {
-    elements.askResponse.innerHTML =
-      "<p>Ask is disabled. Set ASK_ENABLED=true in .env to enable it.</p>";
+    setTextBlock(elements.askResponse, "Ask is disabled. Set ASK_ENABLED=true in .env to enable it.");
   }
 }
 
@@ -719,11 +815,11 @@ async function runAsk() {
   if (!elements.askQuery || !elements.askResponse || !elements.askRun) return;
   const query = elements.askQuery.value.trim();
   if (!query) {
-    elements.askResponse.innerHTML = "<p>Enter a question to ask the feed.</p>";
+    setTextBlock(elements.askResponse, "Enter a question to ask the feed.");
     return;
   }
   elements.askRun.disabled = true;
-  elements.askResponse.innerHTML = "<p>Asking Gemini...</p>";
+  setTextBlock(elements.askResponse, "Asking Gemini...");
   try {
     const result = await fetchJson("/api/ask", {
       method: "POST",
@@ -734,9 +830,9 @@ async function runAsk() {
     const windowLabel = result.window?.label || `Last ${state.ask.lookbackHours} hours`;
     const items = typeof result.window?.items === "number" ? result.window.items : null;
     const meta = items === null ? windowLabel : `${windowLabel} | ${items} snapshots`;
-    elements.askResponse.innerHTML = `<p>${answer}</p><span class="subtle">${meta}</span>`;
+    setTextBlock(elements.askResponse, answer, meta, "subtle");
   } catch (error) {
-    elements.askResponse.innerHTML = "<p>Ask failed. Check logs for details.</p>";
+    setTextBlock(elements.askResponse, "Ask failed. Check logs for details.");
   } finally {
     elements.askRun.disabled = false;
   }
@@ -777,7 +873,7 @@ async function loadData() {
     setHealth(health.status || "degraded");
 
     if (latest.snapshot) {
-      elements.latestImage.src = latest.snapshot;
+      elements.latestImage.src = snapshotUrl(latest.snapshot);
       elements.latestTime.textContent = formatTime(latest.timestamp);
     } else {
       elements.latestImage.removeAttribute("src");
@@ -792,9 +888,12 @@ async function loadData() {
     const latestReport = dailyReports[dailyReports.length - 1];
     if (latestReport) {
       const summaryText = latestReport.summary || latestReport.text || "";
-      elements.dailyReport.innerHTML = `<p>${summaryText}</p><span>${formatTime(
-        latestReport.timestamp
-      )}</span>`;
+      setTextBlock(
+        elements.dailyReport,
+        summaryText || "No daily report yet.",
+        formatTime(latestReport.timestamp),
+        null
+      );
       elements.dailyHighlights.innerHTML = "";
       if (Array.isArray(latestReport.highlights) && latestReport.highlights.length > 0) {
         latestReport.highlights.forEach((item) => {
@@ -811,7 +910,7 @@ async function loadData() {
         elements.dailyTags.innerHTML = "<span class=\"subtle\">No tags yet.</span>";
       }
     } else {
-      elements.dailyReport.innerHTML = "<p>No daily report yet.</p>";
+      setTextBlock(elements.dailyReport, "No daily report yet.", null, null);
       elements.dailyHighlights.innerHTML = "";
       elements.dailyTags.innerHTML = "<span class=\"subtle\">No tags yet.</span>";
     }

@@ -1,4 +1,5 @@
-﻿import queue
+import os
+import queue
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -8,7 +9,7 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -20,19 +21,40 @@ from watchdog.observers.polling import PollingObserver
 from .config import SCHEMA_VERSION, load_settings
 from .monitoring import configure_logging, health_status, metrics
 from .retention import cleanup
-from .storage import list_snapshot_files, read_json, read_last_processed, write_schema_version
+from .storage import fetch_records, list_snapshot_files, read_last_processed, write_schema_version
 from .tasks import TaskRunner, _parse_snapshot_time
 from .usage import summarize_usage
 
 settings = load_settings()
 configure_logging(settings.logs_dir / "app.log", settings.log_level)
 write_schema_version(settings.data_dir, SCHEMA_VERSION)
+WEB_DIR = Path(os.getenv("WEB_DIR", "/web"))
+if not WEB_DIR.exists():
+    fallback = Path(__file__).resolve().parent.parent / "web"
+    if fallback.exists():
+        WEB_DIR = fallback
+
 
 app = FastAPI()
 runner = TaskRunner(settings, metrics)
 ASK_MAX_LOOKBACK_HOURS = 168
 ASK_MAX_ITEMS = 200
 DESCRIPTIONS_MAX_LIMIT = 2000
+
+
+def _is_api_key_valid(request: Request) -> bool:
+    if not settings.api_key:
+        return True
+    supplied = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+    return supplied == settings.api_key
+
+
+@app.middleware("http")
+async def _api_key_guard(request: Request, call_next):
+    if settings.api_key and (request.url.path.startswith("/api/") or request.url.path.startswith("/data/")):
+        if not _is_api_key_valid(request):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 snapshot_queue: queue.Queue[Path] = queue.Queue()
 enqueued_paths: set[Path] = set()
@@ -152,9 +174,14 @@ def _resolve_snapshot_path(path_value: str) -> Path:
         trimmed = trimmed[len("/data/"):]
     trimmed = trimmed.lstrip("/")
     data_root = settings.data_dir.resolve()
+    snapshots_root = settings.snapshots_dir.resolve()
     candidate = (data_root / trimmed).resolve()
-    if data_root not in candidate.parents and candidate != data_root:
-        raise HTTPException(status_code=400, detail="invalid snapshot path")
+    if snapshots_root not in candidate.parents:
+        candidate = (snapshots_root / trimmed).resolve()
+    if snapshots_root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="snapshot path must be under snapshots directory")
+    if candidate.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+        raise HTTPException(status_code=400, detail="invalid snapshot file type")
     if not candidate.exists():
         raise HTTPException(status_code=404, detail="snapshot not found")
     return candidate
@@ -220,7 +247,7 @@ def _on_startup() -> None:
 
 @app.get("/")
 def root():
-    return FileResponse("/web/index.html", headers={"Cache-Control": "no-store"})
+    return FileResponse(str(WEB_DIR / "index.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/config")
@@ -311,28 +338,28 @@ def api_preview():
 
 @app.get("/api/descriptions")
 def api_descriptions(limit: Optional[int] = None, offset: int = 0):
-    items = read_json(settings.data_dir / "descriptions.json", [])
-    if not isinstance(items, list):
-        return []
     if limit is None:
-        return items
+        return fetch_records(settings.data_dir, "descriptions")
     safe_limit = max(1, min(limit, DESCRIPTIONS_MAX_LIMIT))
     safe_offset = max(0, offset)
-    if not items:
-        return []
-    end = max(len(items) - safe_offset, 0)
-    start = max(end - safe_limit, 0)
-    return items[start:end]
+    items = fetch_records(
+        settings.data_dir,
+        "descriptions",
+        limit=safe_limit,
+        offset=safe_offset,
+        newest_first=True,
+    )
+    return list(reversed(items))
 
 
 @app.get("/api/compare/10m")
 def api_compare_10m():
-    return read_json(settings.data_dir / "compare_10m.json", [])
+    return fetch_records(settings.data_dir, "compare_10m")
 
 
 @app.get("/api/compare/hourly")
 def api_compare_hourly():
-    return read_json(settings.data_dir / "compare_hourly.json", [])
+    return fetch_records(settings.data_dir, "compare_hourly")
 
 
 @app.post("/api/compare/custom")
@@ -368,8 +395,8 @@ def api_ask(request: AskRequest):
 
 @app.get("/api/reports/daily")
 def api_reports_daily():
-    return read_json(settings.data_dir / "daily_reports.json", [])
+    return fetch_records(settings.data_dir, "daily_reports")
 
 
-app.mount("/web", NoCacheStaticFiles(directory="/web", html=True), name="web")
+app.mount("/web", NoCacheStaticFiles(directory=str(WEB_DIR), html=True), name="web")
 app.mount("/data/snapshots", StaticFiles(directory=str(settings.snapshots_dir)), name="snapshots")
